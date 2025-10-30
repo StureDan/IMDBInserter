@@ -11,14 +11,14 @@ using System.Text;
 const string connectionString = "Server=localhost;Database=IMDB3;Integrated Security=True;TrustServerCertificate=True;";
 
 // Filstier (uændret)
-const string fileToImportTitles = @"C:\temp\Database obl\title.basics.tsv.gz";
-const string fileToImportPersons = @"C:\temp\Database obl\name.basics.tsv.gz";
-const string fileToImportCrew = @"C:\temp\Database obl\title.crew.tsv.gz";
+const string fileToImportTitles = @"C:\IMDBgz\title.basics.tsv\title.basics (1).tsv";
+const string fileToImportPersons = @"C:\IMDBgz\name.basics.tsv\name.basics.tsv";
+const string fileToImportCrew = @"C:\IMDBgz\title.crew.tsv\title.crew.tsv";
 
 // --- RUN CONFIGURATION ---
 const bool IsDryRun = false;
-const int MaxRowsToProcessForRealRun = 100;
-const int MaxRowsForDryRun = 10000;
+const int MaxRowsToProcessForRealRun = 17000000;
+const int MaxRowsForDryRun = 17000000;
 
 // --- Main Program Execution ---
 Console.WriteLine("Starting import process...");
@@ -48,7 +48,7 @@ static void ImportTitles(string connStr, string filename, bool dryRun)
     Console.WriteLine("\n--- Starting Title Import ---");
     int maxRows = dryRun ? MaxRowsForDryRun : MaxRowsToProcessForRealRun;
     int rowsProcessed = 0;
-
+    
     // RETTET: DataTable- og kolonnenavne matcher nu SQL-scriptet
     var titlesTable = new DataTable("Titles");
     titlesTable.Columns.Add("Id", typeof(int));
@@ -80,9 +80,9 @@ static void ImportTitles(string connStr, string filename, bool dryRun)
     int nextTypeId = 1, nextGenreId = 1;
 
     using var fileStream = new FileStream(filename, FileMode.Open, FileAccess.Read);
-    using var gzipStream = new GZipStream(fileStream, CompressionMode.Decompress);
-    using var reader = new StreamReader(gzipStream, Encoding.UTF8);
-    reader.ReadLine();
+    //using var gzipStream = new GZipStream(fileStream, CompressionMode.Decompress);
+    using var reader = new StreamReader(fileStream, Encoding.UTF8);
+    reader.ReadLine(); // skip header
 
     string currentLine;
     while ((currentLine = reader.ReadLine()) != null && rowsProcessed < maxRows)
@@ -92,6 +92,8 @@ static void ImportTitles(string connStr, string filename, bool dryRun)
         try
         {
             if (!int.TryParse(values[0].AsSpan(2), out int titleId)) continue;
+
+            
 
             var typeName = values[1];
             if (!titleTypeIds.TryGetValue(typeName, out int typeId))
@@ -196,9 +198,9 @@ static void ImportPersons(string connStr, string filename, bool dryRun)
     int nextProfessionId = 1;
 
     using var fileStream = new FileStream(filename, FileMode.Open, FileAccess.Read);
-    using var gzipStream = new GZipStream(fileStream, CompressionMode.Decompress);
-    using var reader = new StreamReader(gzipStream, Encoding.UTF8);
-    reader.ReadLine();
+    //using var gzipStream = new GZipStream(fileStream, CompressionMode.Decompress);
+    using var reader = new StreamReader(fileStream, Encoding.UTF8);
+    reader.ReadLine(); // skip header
 
     string currentLine;
     while ((currentLine = reader.ReadLine()) != null && rowsProcessed < maxRows)
@@ -292,10 +294,11 @@ static void ImportCrew(string connStr, string filename, bool dryRun)
     titleWritersTable.Columns.Add("PersonId", typeof(int));
 
     using var fileStream = new FileStream(filename, FileMode.Open, FileAccess.Read);
-    using var gzipStream = new GZipStream(fileStream, CompressionMode.Decompress);
-    using var reader = new StreamReader(gzipStream, Encoding.UTF8);
-    reader.ReadLine();
+    //using var gzipStream = new GZipStream(fileStream, CompressionMode.Decompress);
+    using var reader = new StreamReader(fileStream, Encoding.UTF8);
+    reader.ReadLine(); // skip header
 
+  
     string currentLine;
     while ((currentLine = reader.ReadLine()) != null && rowsProcessed < maxRows)
     {
@@ -400,7 +403,18 @@ static void BulkInsertWithIdentity(DataTable table, string destinationTable, Sql
     }
 
     // Perform the bulk copy
-    BulkInsert(table, destinationTable, conn, trans);
+    // DENNE LINJE ER RETTET: SqlBulkCopyOptions.KeepIdentity er tilføjet.
+    using (var bulkCopy = new SqlBulkCopy(conn, SqlBulkCopyOptions.KeepIdentity, trans))
+    {
+        bulkCopy.DestinationTableName = destinationTable;
+        foreach (DataColumn col in table.Columns)
+        {
+            bulkCopy.ColumnMappings.Add(col.ColumnName, col.ColumnName);
+        }
+        bulkCopy.WriteToServer(table);
+    }
+    Console.WriteLine($"Successfully inserted {table.Rows.Count:N0} rows into '{destinationTable}'.");
+
 
     // Turn off the identity insert ability
     using (var command = new SqlCommand($"SET IDENTITY_INSERT dbo.{destinationTable} OFF", conn, trans))
