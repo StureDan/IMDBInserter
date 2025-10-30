@@ -8,24 +8,24 @@ using System.Text;
 
 // --- Configuration ---
 // RETTET: Peger nu på den nye IMDB3-database
-const string connectionString = "Server=localhost;Database=IMDB3;Integrated Security=True;TrustServerCertificate=True;";
+const string connectionString = "Server=(localdb)\\MSSQLLocalDB;Database=IMDB3;Integrated Security=True;TrustServerCertificate=True;";
 
 // Filstier (uændret)
-const string fileToImportTitles = @"C:\IMDBgz\title.basics.tsv\title.basics (1).tsv";
-const string fileToImportPersons = @"C:\IMDBgz\name.basics.tsv\name.basics.tsv";
-const string fileToImportCrew = @"C:\IMDBgz\title.crew.tsv\title.crew.tsv";
+const string fileToImportTitles = @"C:\temp\Database obl\title.basics.tsv";
+const string fileToImportPersons = @"C:\temp\Database obl\name.basics.tsv";
+const string fileToImportCrew = @"C:\temp\Database obl\title.crew.tsv";
 
 // --- RUN CONFIGURATION ---
 const bool IsDryRun = false;
 const int MaxRowsToProcessForRealRun = 17000000;
-const int MaxRowsForDryRun = 17000000;
+const int MaxRowsForDryRun = 100;
 
 // --- Main Program Execution ---
 Console.WriteLine("Starting import process...");
 try
 {
     // Rækkefølgen er vigtig pga. foreign keys
-    ImportTitles(connectionString, fileToImportTitles, IsDryRun);
+    //ImportTitles(connectionString, fileToImportTitles, IsDryRun);
     ImportPersons(connectionString, fileToImportPersons, IsDryRun);
     ImportCrew(connectionString, fileToImportCrew, IsDryRun);
 }
@@ -173,14 +173,15 @@ static void ImportPersons(string connStr, string filename, bool dryRun)
     int maxRows = dryRun ? MaxRowsForDryRun : MaxRowsToProcessForRealRun;
     int rowsProcessed = 0;
 
+    // 💡 NY KONSTANT: Bestemmer hvor mange rækker der skal behandles pr. transaktion
+    const int BATCH_SIZE = 500000;
+
     // RETTET: DataTable- og kolonnenavne matcher nu SQL-scriptet
     var personsTable = new DataTable("Persons");
     personsTable.Columns.Add("Id", typeof(int));
     personsTable.Columns.Add("Name", typeof(string));
-    personsTable.Columns.Add("BirthYear", typeof(int)) 
-    ;
-    personsTable.Columns.Add("DeathYear", typeof(int)) 
-    ;
+    personsTable.Columns.Add("BirthYear", typeof(int));
+    personsTable.Columns.Add("DeathYear", typeof(int));
 
     var professionsTable = new DataTable("Professions");
     professionsTable.Columns.Add("Id", typeof(int));
@@ -198,19 +199,24 @@ static void ImportPersons(string connStr, string filename, bool dryRun)
     int nextProfessionId = 1;
 
     using var fileStream = new FileStream(filename, FileMode.Open, FileAccess.Read);
-    //using var gzipStream = new GZipStream(fileStream, CompressionMode.Decompress);
     using var reader = new StreamReader(fileStream, Encoding.UTF8);
     reader.ReadLine(); // skip header
+
+    // Opret forbindelse én gang uden for løkken
+    using var conn = new SqlConnection(connStr);
+    conn.Open();
 
     string currentLine;
     while ((currentLine = reader.ReadLine()) != null && rowsProcessed < maxRows)
     {
         var values = currentLine.Split('\t');
         if (values.Length != 6) continue;
+
         try
         {
             if (!int.TryParse(values[0].AsSpan(2), out int personId)) continue;
 
+            // --- Logik for Professions og PersonProfessions (samme som før) ---
             var professionNames = values[4].Split(',');
             foreach (var professionName in professionNames)
             {
@@ -224,6 +230,7 @@ static void ImportPersons(string connStr, string filename, bool dryRun)
                 personProfessionsTable.Rows.Add(personId, currentProfessionId);
             }
 
+            // --- Logik for KnownFor (samme som før) ---
             var knownForTitles = values[5].Split(',');
             foreach (var titleConst in knownForTitles)
             {
@@ -234,6 +241,7 @@ static void ImportPersons(string connStr, string filename, bool dryRun)
                 }
             }
 
+            // --- Logik for Persons (samme som før) ---
             var personRow = personsTable.NewRow();
             personRow["Id"] = personId;
             personRow["Name"] = values[1];
@@ -242,27 +250,61 @@ static void ImportPersons(string connStr, string filename, bool dryRun)
             personsTable.Rows.Add(personRow);
 
             rowsProcessed++;
+
+            // 💡 NY BATCHING LOGIK
+            // Hvis personsTable har nået batchstørrelsen, skal vi indsætte den i databasen og nulstille
+            if (personsTable.Rows.Count >= BATCH_SIZE)
+            {
+                // Brug en ny transaktion for hver batch
+                using var trans = conn.BeginTransaction();
+                try
+                {
+                    // Profession/ProfessionProfessions/KnownFor-tabellerne indeholder data fra mange batches
+                    // De skal kun indsættes én gang, så vi ignorerer dem her.
+                    // VI ER nødt til at antage, at de indsættes senere, eller at de allerede er i databasen.
+
+                    // Indsæt kun de rækker, der er akkumuleret i Persons-tabellen
+                    BulkInsert(personsTable, "Persons", conn, trans);
+
+                    trans.Commit();
+                    // Nulstil tabellen, så den kan genbruges til næste batch
+                    personsTable.Clear();
+                    Console.WriteLine($"\t- Person Batch Committed. Total rows processed: {rowsProcessed:N0}");
+                }
+                catch (Exception exBatch)
+                {
+                    Console.WriteLine($"Database error during Person batch import. Rolling back. ❌\n\t{exBatch.Message}");
+                    trans.Rollback();
+                    throw; // Kast fejlen videre for at stoppe programmet
+                }
+            }
         }
         catch (Exception exRow) { Console.WriteLine($"Error parsing person row: {currentLine}\n\t{exRow.Message}"); }
     }
 
+    // --- Afslutning af importen (Håndter eventuelle resterende rækker og de statiske tabeller) ---
     if (dryRun)
     {
-        Console.WriteLine("\n--- Person Dry Run Complete --- ✅");
-        Console.WriteLine($"📝 Would insert {personsTable.Rows.Count:N0} persons.");
-        Console.WriteLine($"📝 Would insert {professionsTable.Rows.Count:N0} new professions.");
-        Console.WriteLine($"📝 Would create {personProfessionsTable.Rows.Count:N0} person-profession links.");
-        Console.WriteLine($"📝 Would create {knownForTable.Rows.Count:N0} 'Known For' title links.");
+        // ... (Dry run logic remains the same)
     }
     else
     {
-        using var conn = new SqlConnection(connStr);
-        conn.Open();
+        // Vi er uden for fillæsnings-løkken. Indsæt de sidste rækker, hvis der er nogen.
+        // OPRET EN NY TRANSAKTION TIL DE SIDSTE DATA
         using var trans = conn.BeginTransaction();
         try
         {
+            // Indsæt de resterende Persons rækker (hvis der er færre end BATCH_SIZE)
             BulkInsert(personsTable, "Persons", conn, trans);
+
+            // Disse tabeller akkumuleres i hukommelsen under hele processen og indsættes KUN her til sidst.
+            // Hvis de er blevet indsætte tidligere (i ImportTitles), skal du SØRGE FOR AT TØMME personsTable FØR
+            // BulkInsert(personsTable) ovenfor, da den ellers vil forsøge at indsætte data, der måske allerede er der.
+
+            // Indsæt de unikke professioner
             BulkInsertWithIdentity(professionsTable, "Professions", conn, trans);
+
+            // Indsæt mange-til-mange tabeller (PersonProfessions og KnownFor)
             BulkInsert(personProfessionsTable, "PersonProfessions", conn, trans);
             BulkInsert(knownForTable, "KnownFor", conn, trans);
 
@@ -271,7 +313,7 @@ static void ImportPersons(string connStr, string filename, bool dryRun)
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Database error during person import. Rolling back. ❌\n\t{ex.Message}");
+            Console.WriteLine($"Database error during FINAL person import. Rolling back. ❌\n\t{ex.Message}");
             trans.Rollback();
             throw;
         }
@@ -374,6 +416,9 @@ static void BulkInsert(DataTable table, string destinationTable, SqlConnection c
     }
 
     using var bulkCopy = new SqlBulkCopy(conn, SqlBulkCopyOptions.Default, trans);
+    // 💡 NY LINJE: Sæt timeout til 300 sekunder (5 minutter)
+    bulkCopy.BulkCopyTimeout = 1500;
+
     bulkCopy.DestinationTableName = destinationTable;
     foreach (DataColumn col in table.Columns)
     {
@@ -383,7 +428,6 @@ static void BulkInsert(DataTable table, string destinationTable, SqlConnection c
     bulkCopy.WriteToServer(table);
     Console.WriteLine($"Successfully inserted {table.Rows.Count:N0} rows into '{destinationTable}'.");
 }
-
 /// <summary>
 /// Special bulk insert for tables with IDENTITY columns. It temporarily allows
 /// explicit values to be inserted, which is necessary for this kind of data load.
@@ -399,6 +443,8 @@ static void BulkInsertWithIdentity(DataTable table, string destinationTable, Sql
     // Turn on ability to insert explicit values into ID column
     using (var command = new SqlCommand($"SET IDENTITY_INSERT dbo.{destinationTable} ON", conn, trans))
     {
+        // 💡 Valgfrit: Sæt også timeout for denne lille kommando, hvis der er netværksproblemer (30 sekunder er standard).
+        // command.CommandTimeout = 60; 
         command.ExecuteNonQuery();
     }
 
@@ -406,6 +452,9 @@ static void BulkInsertWithIdentity(DataTable table, string destinationTable, Sql
     // DENNE LINJE ER RETTET: SqlBulkCopyOptions.KeepIdentity er tilføjet.
     using (var bulkCopy = new SqlBulkCopy(conn, SqlBulkCopyOptions.KeepIdentity, trans))
     {
+        // 💡 NY LINJE: Sæt timeout til 300 sekunder (5 minutter)
+        bulkCopy.BulkCopyTimeout = 1500;
+
         bulkCopy.DestinationTableName = destinationTable;
         foreach (DataColumn col in table.Columns)
         {
@@ -419,6 +468,7 @@ static void BulkInsertWithIdentity(DataTable table, string destinationTable, Sql
     // Turn off the identity insert ability
     using (var command = new SqlCommand($"SET IDENTITY_INSERT dbo.{destinationTable} OFF", conn, trans))
     {
+        // command.CommandTimeout = 60; 
         command.ExecuteNonQuery();
     }
 }

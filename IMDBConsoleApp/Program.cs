@@ -3,7 +3,7 @@ using System;
 
 class Program
 {
-    const string connectionString = "Server=localhost;Database=IMDB3;Integrated Security=True;TrustServerCertificate=True;";
+    const string connectionString = "Server=(localdb)\\MSSQLLocalDB;Database=IMDB3;Integrated Security=True;TrustServerCertificate=True;";
 
     static void Main()
     {
@@ -76,43 +76,150 @@ class Program
 
     static void AddMovieSimple()
     {
+        Console.WriteLine("\n--- Add New Movie (C# handles ID) ---");
         Console.Write("Movie title: ");
         string title = Console.ReadLine();
 
         Console.Write("Original title (optional): ");
         string original = Console.ReadLine();
-        if (String.IsNullOrWhiteSpace(original)) original = null;
+        // Brug null hvis strengen er tom eller whitespace
+        string originalOrNull = String.IsNullOrWhiteSpace(original) ? null : original;
+
+        // Hardcodet værdier for de øvrige kolonner
+        int titleTypeId = 1;
+        int isAdult = 0;
 
         using var conn = new SqlConnection(connectionString);
         conn.Open();
 
+        int newId = 0;
+
+        // STEP 1: Find det næste ledige ID (Manuel ID-generering)
+        // Dette er nødvendigt, da vi ikke lader databasen auto-generere Id
+        try
+        {
+            using (var idCmd = new SqlCommand("SELECT MAX(Id) FROM Titles", conn))
+            {
+                var result = idCmd.ExecuteScalar();
+                if (result != DBNull.Value && result != null)
+                {
+                    int maxId = Convert.ToInt32(result);
+                    newId = maxId + 1;
+                }
+                else
+                {
+                    // Hvis tabellen er tom, start ved 1
+                    newId = 1;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error finding max Id: {ex.Message}");
+            return; // Afslut funktionen hvis ID ikke kan findes
+        }
+
+        // STEP 2: Opsæt kommandoen MED @Id parameteren
         using var cmd = new SqlCommand("AddMovieSimple", conn);
         cmd.CommandType = System.Data.CommandType.StoredProcedure;
+
+        // NYT: Inkluder det manuelt beregnede Id
+        cmd.Parameters.AddWithValue("@Id", newId);
+
+        // Alle øvrige parametre
+        cmd.Parameters.AddWithValue("@TitleTypeId", titleTypeId);
         cmd.Parameters.AddWithValue("@PrimaryTitle", title);
-        cmd.Parameters.AddWithValue("@OriginalTitle", (object?)original ?? DBNull.Value);
 
-        cmd.ExecuteNonQuery();
+        cmd.Parameters.AddWithValue("@OriginalTitle", (object?)originalOrNull ?? DBNull.Value);
 
-        Console.WriteLine("✅ Movie added");
+        cmd.Parameters.AddWithValue("@IsAdult", isAdult);
+
+        // Sæt de valgfrie int-felter til DBNull.Value
+        cmd.Parameters.AddWithValue("@StartYear", DBNull.Value);
+        cmd.Parameters.AddWithValue("@EndYear", DBNull.Value);
+        cmd.Parameters.AddWithValue("@RuntimeMinutes", DBNull.Value);
+
+        try
+        {
+            // STEP 3: Udfør indsættelsen
+            cmd.ExecuteNonQuery();
+            Console.WriteLine($"✅ Movie added successfully. C# assigned ID: {newId}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error adding movie: {ex.Message}");
+        }
     }
-
     static void AddPerson()
     {
+        Console.WriteLine("\n--- Add New Person (C# handles ID) ---");
+
+        // Indsaml data
         Console.Write("Person name: ");
         string name = Console.ReadLine();
 
+        Console.Write("Birth Year (optional, e.g., 1980): ");
+        string birthYearInput = Console.ReadLine();
+
+        Console.Write("Death Year (optional, e.g., 2020): ");
+        string deathYearInput = Console.ReadLine();
+
+        // Håndter valgfrie Int-felter
+        object birthYearParam = int.TryParse(birthYearInput, out int birthYear) ? (object)birthYear : DBNull.Value;
+        object deathYearParam = int.TryParse(deathYearInput, out int deathYear) ? (object)deathYear : DBNull.Value;
+
         using var conn = new SqlConnection(connectionString);
         conn.Open();
 
+        int newId = 0;
+
+        // STEP 1: Find det næste ledige ID fra Persons-tabellen
+        try
+        {
+            using (var idCmd = new SqlCommand("SELECT MAX(Id) FROM Persons", conn))
+            {
+                var result = idCmd.ExecuteScalar();
+                if (result != DBNull.Value && result != null)
+                {
+                    int maxId = Convert.ToInt32(result);
+                    newId = maxId + 1;
+                }
+                else
+                {
+                    // Hvis tabellen er tom, start ved 1
+                    newId = 1;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error finding max Id for Persons: {ex.Message}");
+            return;
+        }
+
+        // STEP 2: Opsæt kommandoen MED @Id parameteren
         using var cmd = new SqlCommand("AddPerson", conn);
         cmd.CommandType = System.Data.CommandType.StoredProcedure;
+
+        // Inkluder det manuelt beregnede Id
+        cmd.Parameters.AddWithValue("@Id", newId);
+
+        // Alle øvrige parametre
         cmd.Parameters.AddWithValue("@Name", name);
+        cmd.Parameters.AddWithValue("@BirthYear", birthYearParam);
+        cmd.Parameters.AddWithValue("@DeathYear", deathYearParam);
 
-        cmd.ExecuteNonQuery();
-
-        Console.WriteLine("✅ Person added");
+        try
+        {
+            // STEP 3: Udfør indsættelsen
+            cmd.ExecuteNonQuery();
+            Console.WriteLine($"✅ Person added successfully. C# assigned ID: {newId}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error adding person: {ex.Message}");
+        }
     }
-
     static void UpdateMovie()
     {
         Console.Write("Movie Id to update: ");
